@@ -191,6 +191,44 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ),
           ),
           const Divider(),
+          _SectionHeader('전원 · 백그라운드'),
+          ListTile(
+            leading: Icon(
+              Icons.power_settings_new,
+              color: state.powerOn ? AppColors.txRed : AppColors.textLow,
+            ),
+            title: Text('전원 ${state.powerOn ? '켜짐' : '꺼짐'}'),
+            subtitle: const Text('꺼짐 시 앱 프로세스가 완전히 종료됩니다'),
+            trailing: const Text('상단 전원 버튼'),
+          ),
+          FutureBuilder<PermissionStatus>(
+            future: Permission.notification.status,
+            builder: (context, snap) {
+              final status = snap.data;
+              final label = switch (status) {
+                PermissionStatus.granted => '허용됨',
+                PermissionStatus.denied => '거부됨',
+                PermissionStatus.permanentlyDenied => '차단됨',
+                PermissionStatus.limited => '제한적 허용',
+                _ => '확인 중…',
+              };
+              return ListTile(
+                leading: Icon(
+                  Icons.notifications_active_outlined,
+                  color: status?.isGranted == true
+                      ? AppColors.rxGreen
+                      : AppColors.textLow,
+                ),
+                title: Text('알림 ($label)'),
+                subtitle: const Text('전원 상태와 상대 호출 알림에 필요합니다'),
+                trailing: TextButton(
+                  onPressed: openAppSettings,
+                  child: const Text('앱 설정 열기'),
+                ),
+              );
+            },
+          ),
+          const Divider(),
           _SectionHeader('연결 권한'),
           FutureBuilder<PermissionStatus>(
             future: Permission.microphone.status,

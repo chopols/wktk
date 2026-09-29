@@ -40,5 +40,26 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "wktk/power")
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    // 전원 ON: 백그라운드 대기를 위한 포그라운드 서비스 기동.
+                    "setPower" -> {
+                        PowerController.setPower(this, call.argument<Boolean>("on") ?: false)
+                        result.success(true)
+                    }
+                    // 백그라운드 대기 중 상대 PTT → 알림 + 진동 + 포그라운드 전환.
+                    "ring" -> {
+                        PowerController.ring(
+                            this,
+                            call.argument<String>("talker"),
+                            call.argument<Int>("channel"),
+                        )
+                        result.success(true)
+                    }
+                    "isPowerOn" -> result.success(PowerController.isActive)
+                    else -> result.notImplemented()
+                }
+            }
     }
 }

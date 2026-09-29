@@ -8,6 +8,7 @@ import 'walkie_controller.dart';
 import 'widgets/antenna_widget.dart';
 import 'widgets/lcd_panel.dart';
 import 'widgets/peer_list_sheet.dart';
+import 'widgets/power_button.dart';
 import 'widgets/ptt_button.dart';
 import 'widgets/rotary_knob.dart';
 import 'widgets/speaker_grille_widget.dart';
@@ -23,6 +24,21 @@ class WalkieScreen extends ConsumerWidget {
     final controller = ref.read(walkieControllerProvider.notifier);
     final tx = state.txStatus == TxStatus.transmitting;
     final rx = state.txStatus == TxStatus.receiving;
+
+    // 백그라운드 대기 중 상대가 PTT를 눌러 전화를 걸어 온 경우.
+    ref.listen<String?>(
+      walkieControllerProvider.select((s) => s.incomingCaller),
+      (prev, next) {
+        if (next == null || next.isEmpty) return;
+        final messenger = ScaffoldMessenger.maybeOf(context);
+        messenger?.showSnackBar(
+          SnackBar(
+            duration: const Duration(seconds: 4),
+            content: Text('$next 님이 전화를 걸었습니다'),
+          ),
+        );
+      },
+    );
 
     final String? sessionError = state.sessionError;
     final StatusBanner? banner = sessionError != null
@@ -86,16 +102,30 @@ class WalkieScreen extends ConsumerWidget {
                         ),
                       ),
                     ),
-                    IconButton(
-                      tooltip: '설정',
-                      onPressed: () {
-                        Navigator.of(context).push(
-                          MaterialPageRoute(
-                            builder: (_) => const SettingsScreen(),
+                    // 환경설정 바로 아래 붉은 전원 버튼
+                    Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          tooltip: '설정',
+                          onPressed: () {
+                            Navigator.of(context).push(
+                              MaterialPageRoute(
+                                builder: (_) => const SettingsScreen(),
+                              ),
+                            );
+                          },
+                          icon: const Icon(
+                            Icons.tune,
+                            color: AppColors.textLow,
                           ),
-                        );
-                      },
-                      icon: const Icon(Icons.tune, color: AppColors.textLow),
+                        ),
+                        PowerButton(
+                          on: state.powerOn,
+                          onPressed: () =>
+                              _confirmPowerOff(context, controller),
+                        ),
+                      ],
                     ),
                   ],
                 ),
@@ -331,5 +361,49 @@ class WalkieScreen extends ConsumerWidget {
         ),
       ),
     );
+  }
+
+  /// 전원 OFF 확인 → 확정 시 세션/서비스를 정리하고 프로세스를 완전히 종료한다.
+  Future<void> _confirmPowerOff(
+    BuildContext context,
+    WalkieController controller,
+  ) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surface,
+        title: const Text(
+          '전원을 끄시겠습니까?',
+          style: TextStyle(
+            color: AppColors.textHi,
+            fontWeight: FontWeight.w800,
+            fontSize: 17,
+          ),
+        ),
+        content: const Text(
+          '앱 프로세스가 완전히 종료됩니다.\n'
+          '백그라운드 대기·자동 전화가 모두 멈춥니다.\n'
+          '다시 사용하려면 앱을 직접 실행해 주세요.',
+          style: TextStyle(color: AppColors.textMid, fontSize: 13, height: 1.5),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('취소'),
+          ),
+          FilledButton.icon(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            icon: const Icon(Icons.power_settings_new, size: 18),
+            label: const Text('전원 끄기'),
+            style: FilledButton.styleFrom(
+              backgroundColor: AppColors.txRed,
+              foregroundColor: Colors.white,
+            ),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    await controller.powerOff();
   }
 }

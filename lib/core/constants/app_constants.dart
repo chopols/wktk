@@ -80,6 +80,10 @@ abstract final class AppConstants {
   static const int kChannelCount = 16;
   static const int kMaxNicknameChars = 12;
 
+  // ── 백그라운드 대기 / 호출 ────────────────────────────────
+  /// 백그라운드 대기 중 상대 PTT 감지 시 같은 발화 연속으로 중복 전화하지 않도록 하는 쿨다운
+  static const Duration kIncomingCallCooldown = Duration(seconds: 3);
+
   // ── 암호화 확장 포인트 ──────────────────────────────────
   // 현재 단계에서 암호화 없음. 확장 시:
   //  - 패킷 flags bit0(crypt) = 1

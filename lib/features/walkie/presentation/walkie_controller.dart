@@ -4,6 +4,7 @@
 /// Step 4: TransceiverService(PRESENCE/TX_START/TX_END/AUDIO) + 마이크 캡처 + 재생 연결.
 /// Step 5: 지터버퍼(순서 복원/중복 폐기/PLC), 반이중 중재(거부/충돌), VOX,
 ///   수신 노이즈 게이트, 효과음(roger/squelch/denied)·햅틱.
+/// Step 9: 전원 ON/OFF(포그라운드 서비스로 백그라운드 대기) + 상대 PTT 자동 전화.
 library;
 
 import 'dart:async';
@@ -17,6 +18,8 @@ import '../../../core/constants/app_constants.dart';
 import '../../../core/network/network_monitor.dart';
 import '../../../core/network/transport/dart_udp_transport.dart';
 import '../../../core/network/transport/native/multicast_lock_channel.dart';
+import '../../../core/platform/notification_permission.dart';
+import '../../../core/platform/power_channel.dart';
 import '../../../core/utils/kv_store.dart';
 import '../data/audio/audio_capture.dart';
 import '../data/audio/audio_playback.dart';
@@ -46,9 +49,11 @@ class WalkieController extends Notifier<WalkieUiState> {
   AppLifecycleListener? _lifecycle;
   int _frameCounter = 0;
   DateTime? _lastAudioAt;
+  DateTime? _lastIncomingCallAt;
   bool _starting = false;
   int _voxSpeechMs = 0;
   int _voxSilenceMs = 0;
+  AppLifecycleState _lifecycleState = AppLifecycleState.resumed;
 
   TransceiverService? get service => _service;
 
@@ -57,16 +62,20 @@ class WalkieController extends Notifier<WalkieUiState> {
     // 네트워크(Wi-Fi) 연결/해제 시 세션 라이프사이클. fireImmediately 없이
     // 변경 시에만 호출되므로 이전 빌드 중 `state=` 쓰기 트랩에서 자유롭다.
     ref.listen(networkStatusProvider, (_, next) {
+      if (!state.powerOn) return;
       if (next.connected) {
         unawaited(_ensureSession(localIPv4: next.localIPv4));
       } else {
         unawaited(_teardownSession());
       }
     });
-    // 백그라운드에서 복귀하면 OS가 Wi-Fi 멀티캐스트 멤버십을 끊어 접속이
-    // 만료될 수 있어 세션을 재기동(멀티캐스트 재가입 + PRESENCE 즉시 송신)한다.
+    // 앱이 포그라운드인 동안 `resumed` 로 유지해, 백그라운드일 때만 상대 PTT 전화가
+    // 자동으로 올라오도록 구분한다.
+    _lifecycleState =
+        WidgetsBinding.instance.lifecycleState ?? AppLifecycleState.resumed;
     _lifecycle = AppLifecycleListener(
-      onResume: () => unawaited(_reconnectFromBackground()),
+      onStateChange: (s) => _lifecycleState = s,
+      onResume: () => unawaited(_onResume()),
     );
     ref.onDispose(() {
       _lifecycle?.dispose();
@@ -75,20 +84,70 @@ class WalkieController extends Notifier<WalkieUiState> {
     });
     // 저장된 설정을 상태로 미리 반영 (세션 시작 전에도 설정 화면이 최신값 표시).
     unawaited(_loadPersistedSettings());
+    // 앱 실행 = 전원 ON. 백그라운드에서 계속 대기할 수 있도록 서비스를 기동한다.
+    // (Notifier.build() 안에서 바로 state= 를 쓰면 초기화 전 참조가 되므로 마이크로태스크로 미룬다)
+    scheduleMicrotask(_powerOn);
     return WalkieUiState.initial;
   }
 
-  /// 백그라운드 → 포그라운드 복귀 시 세션 재기동으로 접속을 복구한다.
-  Future<void> _reconnectFromBackground() async {
+  // ── 전원 (프로세스 수명 통제) ─────────────────────────────
+
+  /// 전원 ON: 백그라운드 대기용 포그라운드 서비스를 기동한다.
+  Future<void> _powerOn() async {
+    if (!ref.mounted) return;
+    state = state.copyWith(powerOn: true);
+    await PowerChannel.setPower(true);
+    // 상시 알림(전원 표시)을 보이기 위한 알림 권한(Android 13+).
+    unawaited(NotificationPermission.ensure());
+  }
+
+  /// 전원 OFF: 세션을 정리하고 **전체 프로세스를 완전히 종료**한다.
+  ///
+  /// 전원 ON 상태만 정상 동작하므로 OFF는 상태 머신으로 남기지 않고 네이티브에서
+  /// 서비스 정지 + `Process.killProcess` 로 프로세스 자체를 끝낸다(앱 재실행 시 다시 ON).
+  Future<void> powerOff() async {
+    if (!state.powerOn) return;
+    state = state.copyWith(powerOn: false);
+    await _teardownSession();
+    if (!ref.mounted) return;
+    await PowerChannel.setPower(false);
+    // 채널이 없는 환경(iOS/테스트)에서는 Activity 만 종료한다.
+    await SystemNavigator.pop();
+  }
+
+  /// 포그라운드 복귀: 세션이 살아 있으면 유지하고, 죽었을 때만 다시 기동한다.
+  /// (전원 ON 중에는 서비스가 프로세스를 붙잡고 있으므로 매번 재기동하면 안 된다.)
+  Future<void> _onResume() async {
+    if (!state.powerOn) return;
     final net = ref.read(networkStatusProvider);
     if (!net.connected) return;
-    if (_service?.isTransmitting ?? false) return; // 통화 중이면 끊지 않는다
-    await restartSession(localIPv4: net.localIPv4);
+    await PowerChannel.setPower(true); // 서비스가 정리됐을 수 있어 재확인
+    if (_service?.started ?? false) return;
+    await _ensureSession(localIPv4: net.localIPv4);
+  }
+
+  /// 백그라운드 대기 중 상대 PTT → 자동 전화(알림·진동 + 포그라운드 전환).
+  void _maybeCallFromBackground(String? talker) {
+    if (!state.powerOn) return;
+    if (_lifecycleState == AppLifecycleState.resumed) return;
+    final now = DateTime.now();
+    final last = _lastIncomingCallAt;
+    if (last != null &&
+        now.difference(last) < AppConstants.kIncomingCallCooldown) {
+      return;
+    }
+    _lastIncomingCallAt = now;
+    final name = talker?.trim();
+    state = state.copyWith(
+      incomingCaller: (name == null || name.isEmpty) ? null : name,
+    );
+    unawaited(PowerChannel.ring(talker: name, channel: state.channel));
   }
 
   /// '접속 확인' 버튼: 네트워크에 연결돼 있으면 세션을 재기동한다.
   /// [bool] 반환 = 재기동을 시도했는지(미연결/통화 중이면 false).
   Future<bool> checkConnection() async {
+    if (!state.powerOn) return false;
     final net = ref.read(networkStatusProvider);
     if (!net.connected) return false;
     await restartSession(localIPv4: net.localIPv4);
@@ -119,6 +178,7 @@ class WalkieController extends Notifier<WalkieUiState> {
   }
 
   Future<void> _ensureSession({String? localIPv4}) async {
+    if (!state.powerOn) return;
     if (_starting) return;
     if (_service?.started ?? false) return;
     _starting = true;
@@ -229,6 +289,7 @@ class WalkieController extends Notifier<WalkieUiState> {
       signalLevel: 0.0,
       channelBusy: false,
       talkerNickname: null,
+      incomingCaller: null,
     );
   }
 
@@ -267,6 +328,8 @@ class WalkieController extends Notifier<WalkieUiState> {
         });
       case BusEventKind.remoteStarted:
         if (state.effectsEnabled) _effects?.squelch();
+        // 백그라운드 대기 중이면 상대 PTT에 자동으로 전화를 건다.
+        _maybeCallFromBackground(e.nickname);
     }
   }
 
@@ -286,6 +349,9 @@ class WalkieController extends Notifier<WalkieUiState> {
       _jitter?.resetStats();
       _jitter?.reset();
       playback?.reset();
+      // PRESENCE(txActive)로 이미 버스가 점유된 뒤 첫 오디오가 도착하는 경우에도
+      // 버스트 첫 프레임에서 백그라운드 전화가 누락되지 않도록 여기서도 감지한다.
+      _maybeCallFromBackground(rx.nickname);
     }
     _lastAudioAt = now;
     _jitter?.offer(rx.seq, rx.pcm);
@@ -294,7 +360,11 @@ class WalkieController extends Notifier<WalkieUiState> {
     _rxIdleTimer = Timer(AppConstants.kRxIdleTimeout, () {
       _rxIdleTimer = null;
       if (state.txStatus == TxStatus.receiving) {
-        state = state.copyWith(txStatus: TxStatus.idle, talkerNickname: null);
+        state = state.copyWith(
+          txStatus: TxStatus.idle,
+          talkerNickname: null,
+          incomingCaller: null,
+        );
       }
     });
     state = state.copyWith(
@@ -316,6 +386,10 @@ class WalkieController extends Notifier<WalkieUiState> {
   // ── 송신 (PTT / VOX 공용) ───────────────────────────────
 
   Future<void> pttDown() async {
+    if (!state.powerOn) {
+      HapticFeedback.heavyImpact();
+      return;
+    }
     if (!ref.read(networkStatusProvider).connected) {
       HapticFeedback.heavyImpact();
       return;

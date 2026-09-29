@@ -163,11 +163,19 @@ rxRemote ◀── 타인 TX_START        busyOwner = (peerId, since)
 
 **Android** (`minSdk 24`, Kotlin)
 - 권한: `INTERNET`, `RECORD_AUDIO`, `ACCESS_WIFI_STATE`, `CHANGE_WIFI_MULTICAST_STATE`,
-  `ACCESS_NETWORK_STATE`, `WAKE_LOCK` (FGS 도입 시 `FOREGROUND_SERVICE_MEDIA_PLAYBACK`, `POST_NOTIFICATIONS`)
+  `ACCESS_NETWORK_STATE`, `WAKE_LOCK`, (Step 9 추가) `FOREGROUND_SERVICE`,
+  `FOREGROUND_SERVICE_MEDIA_PLAYBACK`, `POST_NOTIFICATIONS`, `VIBRATE`,
+  `USE_FULL_SCREEN_INTENT`
 - `MethodChannel('wktk/multicast')` → `acquire` / `release`
   : `WifiManager.createMulticastLock("wktk")`, `setReferenceCounted(false)`
   — **멀티캐스트 join보다 먼저 획득**해야 한다.
+- `MethodChannel('wktk/power')` → `setPower`(포그라운드 서비스 기동/종료+프로세스 종료) /
+  `ring`(헤드업 알림 + 진동 + 액티비티 기동) / `isPowerOn`
 - `MethodChannel('wktk/audio_session')` → 오디오 세션/경로 설정
+- 포그라운드 서비스 `WktkPowerService`(`foregroundServiceType=mediaPlayback`,
+  `stopWithTask=false`): 부분 웨이크락 + Wi-Fi 락 + 멀티캐스트 락, 상시 알림
+  (`열기`/`전원 끄기` 액션). `MainActivity`는 `launchMode=singleTask`,
+  `taskAffinity` 제거 → 서비스에서 호출 인텐트로 기존 태스크가 확실히 올라온다.
 
 **iOS** (Swift, `Info.plist`)
 - `NSMicrophoneUsageDescription`, `NSLocalNetworkUsageDescription`
@@ -188,6 +196,7 @@ lib/core/constants/app_constants.dart
 lib/core/network/{packet.dart, packet_codec.dart, subnet.dart,
                  transport/{transport.dart, dart_udp_transport.dart,
                             native/multicast_lock_channel.dart, audio_session_channel.dart}}
+lib/core/platform/{power_channel.dart, notification_permission.dart}
 lib/core/audio/{audio_capture.dart, audio_playback.dart, pcm_slicer.dart,
                 jitter_buffer.dart, rms.dart}
 lib/core/utils/{clock.dart, logger.dart}
@@ -199,7 +208,10 @@ lib/features/onboarding/{onboarding_screen.dart, onboarding_controller.dart}
 assets/sounds/{roger_beep.wav, squelch.wav, denied.wav}
 tool/{gen_sounds.dart, radio_sim.dart}
 test/{packet_codec_test.dart, jitter_buffer_test.dart, channel_arbiter_test.dart,
-      peer_registry_test.dart, pcm_slicer_test.dart, settings_test.dart}
+      peer_registry_test.dart, pcm_slicer_test.dart, settings_test.dart,
+      power_test.dart}
+android/app/src/main/kotlin/com/wktk/wktk/{MainActivity.kt, PowerController.kt,
+                                           WktkPowerService.kt}
 ```
 
 ## 12. 단계별 체크리스트
@@ -405,6 +417,66 @@ test/{packet_codec_test.dart, jitter_buffer_test.dart, channel_arbiter_test.dart
 - 해결(수동): PTT 좌측의 IDLE/통화 중 상태 텍스트(상단 LED·LCD와 중복)를 제거하고
   '접속 확인' `OutlinedButton` 배치 → `checkConnection()`. Wi-Fi 미연결이면 안내 SnackBar.
 
+### Step 9 — 전원 스위치 · 백그라운드 유지 · 상대 PTT 자동 전화 `상태: 완료`
+> 요구: (1) 현재 포그라운드에서만 동작하고 백그라운드에서 접속이 끊기는 문제를 해결,
+> (2) 프로세스 수명은 정확히 전원 ON/OFF로 통제,
+> (3) 앱 상단 환경설정 아래에 붉은 전원 버튼,
+> (4) 전원 OFF일 때만 전체 프로세스를 완전히 종료,
+> (5) 그 외에는 백그라운드에서 계속 대기하고 상대 PTT 시 자동으로 포그라운드로 전화.
+
+**원인 분석**
+- 백그라운드 전환 시 앱이 살아 있어도 Android가 CPU를 `Idle`(Doze) 상태로 만들어
+  Dart 타이머(PRESENCE 2 s)·UDP 수신이 멈추고, Wi-Fi 멀티캐스트 멤버십도 정지되어
+  상대에게 접속이 끊긴 것처럼 보인다. 포그라운드 복귀 시 재접속은 되지만 대기 중 수신이 안 된다.
+- 설계상 세션은 백그라운드에서도 유지되도록 되어 있으나(Step 8), 이를 뒷받침할
+  **포그라운드 서비스가 없어** OS가 자유롭게 프로세스를 정지/강제 종료할 수 있었다.
+
+**해결 설계**
+1. **Android 포그라운드 서비스** `WktkPowerService`(`foregroundServiceType=mediaPlayback`)
+   - 앱 시작(전원 ON) 시 `startForeground` → 프로세스 생존 보장 + 상시 알림 표시.
+   - 서비스가 `PARTIAL_WAKE_LOCK`(CPU) + `WifiLock`(Wi-Fi 유지) + `MulticastLock`을
+     잡아 화면이 꺼져도 소켓 수신·PRESENCE가 계속 동작.
+   - 알림 액션: `열기` / `전원 끄기`(서비스 정지 + `Process.killProcess`로 완전 종료).
+2. **전원 상태** `WalkieUiState.powerOn`(기본 ON). 앱 기동 = 전원 ON.
+   - 전원 ON: 포그라운드 서비스 기동, 백그라운드에서 계속 대기.
+   - 전원 OFF: 확인 다이얼로그 → 세션 teardown → 서비스 정지 → **프로세스 완전 종료**.
+     (종료 후 재실행하면 전원 ON 상태로 부팅되므로 OFF 상태는 영속화하지 않는다.)
+3. **상대 PTT 자동 전화**
+   - 백그라운드 상태에서 `remoteStarted` 버스 이벤트 또는 RX 버스트 첫 프레임 감지 시
+     (3초 쿨다운) 네이티브 `ring` 호출 → 헤드업 알림 + 진동 + `MainActivity` 기동
+     (`FLAG_ACTIVITY_NEW_TASK|SINGLE_TOP`, `launchMode=singleTask`, `taskAffinity` 제거로
+     기존 태스크가 확실히 앞으로 올라온다).
+   - 포그라운드 복귀 시 `incomingCaller` 로 SnackBar 표시 후 자동 해제.
+4. **포그라운드 복귀 처리 변경**: 이전 Step 8은 매 복귀마다 세션을 재기동(teardown→start)했다.
+   전원 ON 중에는 세션이 살아 있으므로 **세션이 없을 때만** 재기동하고, 있으면 FGS만 재확인한다.
+5. **권한 추가**: `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_MEDIA_PLAYBACK`,
+   `POST_NOTIFICATIONS`, `VIBRATE`, `USE_FULL_SCREEN_INTENT`. 알림 권한은 온보딩에서 함께 요청.
+6. **iOS**: 로컬 네트워크 멀티캐스트 entitlement 없이는 백그라운드 UDP 수신이 불가하므로
+   본 Step은 Android 한정. iOS는 앱 정면(foreground) 동작 그대로 유지.
+
+**검증 계획**: `flutter analyze` 0건 / `flutter test` (신규 전원·호출 테스트 포함) /
+`flutter build apk --debug` / 실기기에서 화면 OFF 상태 PTT 수신 확인.
+
+**검증 결과**: `flutter analyze` 0건, `flutter test` 72/72(신규 `power_test.dart` 5건),
+`flutter build apk --debug` 성공. 실기기 2대 E2E(화면 OFF 후 PTT 수신·자동 전화)는 미수행.
+
+**구현 노트**
+- `WktkPowerService`(mediaPlayback FGS) + `PowerController`(정적 제어/알림 빌더).
+  `setPower(false)` 는 `stopService` 후 250 ms 뒤 `Process.killProcess` → 완전 종료.
+  알림 액션 "전원 끄기" 도 동일 경로(`ACTION_POWER_OFF`)를 사용한다.
+- `walkie_controller`: `build()` 끝에서 `scheduleMicrotask(_powerOn)` — Notifier `build()`
+  안에서 동기 `state=` 는 초기화 전 참조가 된다(이미 알려진 함정).
+  `onResume` 은 세션이 없을 때만 재기동(전에는 매번 teardown→start 로 끊김 유발).
+- `_maybeCallFromBackground`: `AppLifecycleState` 가 `resumed` 가 아니고
+  `remoteStarted` 버스 이벤트 또는 RX 버스트 첫 프레임에서만 발화(쿨다운 3초).
+- `WalkieUiState.copyWith` 의 nullable 필드에 `_unset` 센티널 도입 —
+  기존 `talkerNickname ?? this.talkerNickname` 때문에 `null` 로 지우기가 불가능했던
+  버그(`incomingCaller` 추가와 함께)도 함께 해결했다.
+- 함정: 무전기 화면에는 점멸 LED 등 무한 애니메이션이 있어 위젯 테스트의
+  `pumpAndSettle` 이 타임아웃한다 → 다이얼로그 전환은 `pump(400 ms)` 로 처리.
+- `launchMode=singleTask` + `taskAffinity` 제거: 서비스에서 호출 인텐트를 띄울 때
+  기존 태스크가 확실히 앞으로 올라온다(Flutter 템플릿의 빈 affinity는 재사용 불안정).
+
 ## 13. 변경 이력
 
 | 일시 | 내용 |
@@ -418,3 +490,4 @@ test/{packet_codec_test.dart, jitter_buffer_test.dart, channel_arbiter_test.dart
 | 2026-09-29 | Step 6 완료(설정·예외처리·테스트·README). AppPrefs 전 설정 영속화(volume/effects/haptics/vox/noiseGate/themeMode), `ThemeModeController`(다크/라이트/시스템) + main.dart themeMode 연동. WalkieController: `_loadPersistedSettings`+세션 시작 시 재로드, 세터 영속화, `setNickname`(재시작), `restartSession`/`retrySession`, `sessionError` 배너. 설정 화면 재구현(닉네임/기본채널/볼륨/효과음/햅틱/VOX/노이즈게이트/테마/권한), Wi-Fi 배너 '설정' 이동. settings_screen_test 6건(네트워크 스텁 override + 큰 뷰포트). README 작성. 함정: `.valueOrNull` 미존재, RadioGroup API(3.32+), 위젯테스트 pending Timer→override, 뷰포트 잘림. analyze 0·테스트 67/67·APK 성공. 다음: 실기기 2대 E2E(지연/음질 실측). |
 | 2026-09-29 | Step 7 완료(접속자 목록·전송 폴백 수정). `DartUdpTransport`에 `broadcastEnabled`(SO_BROADCAST) 적용으로 멀티캐스트 차단 환경(iOS/일부 AP)에서 브로드캐스트 폴백 정상화(접속 대수 0 원인). `Peer`를 `domain/`으로 이동, `WalkieUiState.peers` 추가, `peer_list_sheet.dart` 신규(송신 중 우선 정렬·닉네임/주소 표시). 하단·LCD "접속 N대" 탭으로 목록 열기. analyze 0·테스트 67/67. |
 | 2026-09-29 | Step 8 완료(백그라운드 복귀 재접속·접속 확인 버튼). `AppLifecycleListener(onResume)`로 복귀 시 세션 재기동(멀티캐스트 재가입+PRESENCE 재송신). `checkConnection()` 추가, PTT 좌측 상태 텍스트를 '접속 확인' 버튼으로 교체. analyze 0·테스트 67/67·APK 재빌드. |
+| 2026-09-29 | Step 9 완료(전원 스위치·백그라운드 유지·상대 PTT 자동 전화). 원인: FGS 부재로 백그라운드에서 CPU 절전+멀티캐스트 정지 → 접속 끊김. 해결: `WktkPowerService`(mediaPlayback FGS, 부분 웨이크락+Wi-Fi 락+멀티캐스트 락, 상시 알림 `열기`/`전원 끄기`), `PowerController`(setPower/ring/isPowerOn, OFF 시 stopService+`Process.killProcess`), `lib/core/platform/power_channel.dart`+`notification_permission.dart`. 상단 환경설정 아래 붉은 `PowerButton` + 전원 OFF 확인 다이얼로그, 백그라운드 PTT 감지 시 헤드업 알림·진동 + 자동 전화(3초 쿨다운) + SnackBar. `onResume` 세션 재기동 → 세션 없을 때만. 권한 5종 추가, `launchMode=singleTask`/`taskAffinity` 제거. copyWith nullable 센티널 버그 수정. analyze 0·테스트 72/72·APK 성공. 다음: 실기기 2대 E2E(화면 OFF 상태 PTT). |

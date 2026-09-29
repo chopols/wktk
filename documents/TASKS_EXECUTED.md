@@ -426,3 +426,102 @@
 ### 미해결 이슈 / 다음 액션
 - 실기기에서 백그라운드 → 복귀 시 자동 복구 및 '접속 확인' 버튼 동작 실측.
 - (선택) Android Foreground Service로 백그라운드 수신 유지(후순위).
+
+---
+
+## Step 9 — 전원 스위치 · 백그라운드 유지 · 상대 PTT 자동 전화 — 2026-09-29
+
+### 요구 사항
+
+1. 현재 포그라운드에서만 정상 작동하고 백그라운드에서 작동을 안 하며 접속이 끊김 → 해결.
+2. 정확한 전원 ON/OFF로 프로세스를 콘트롤.
+3. APP 상단 환경설정 아래에 붉은 전원 버튼.
+4. 전원 OFF 시에만 전체 프로세스를 완전히 종료.
+5. 그 외에는 백그라운드에서 계속 대기하고, 상대가 PTT 시 자동으로 포그라운드로 전화.
+
+### 원인 분석
+
+- 앱 프로세스가 살아 있어도 Android가 백그라운드에서 CPU를 절전(Doze) 상태로 보내
+  PRESENCE 타이머(2초)와 UDP 수신이 멈추고, Wi-Fi 멀티캐스트 멤버십도 정지되어
+  상대 입장에서 '접속 끊김'으로 보인다.
+- 설계상 세션은 백그라운드에서도 유지되도록 되어 있었으나(Step 8), 이를 뒷받침할
+  **포그라운드 서비스가 없어** OS가 언제든 프로세스를 정지/강제 종료할 수 있었다.
+
+### 변경 파일
+
+1. `android/app/src/main/kotlin/com/wktk/wktk/WktkPowerService.kt` (신규)
+   - `foregroundServiceType=mediaPlayback` 포그라운드 서비스, `START_STICKY`.
+   - `PARTIAL_WAKE_LOCK`(화면 꺼짐 중 CPU 유지) + `WIFI_MODE_FULL_HIGH_PERF` Wi-Fi 락 +
+     멀티캐스트 락을 획득/해제 → 화면 꺼진 상태에서도 PRESENCE·UDP 수신 지속.
+   - `startForeground` 실패(정책 제한) 시 예외를 삼가고 `stopSelf`(앱 죽음 방지).
+   - 알림 액션 `전원 끄기`(ACTION_POWER_OFF) → `stopSelf` + 프로세스 종료.
+2. `android/app/src/main/kotlin/com/wktk/wktk/PowerController.kt` (신규)
+   - `setPower(on)` ON: `startForegroundService`, OFF: `stopService` + 250 ms 뒤
+     `Process.killProcess`(MethodChannel 응답이 먼저 전달되도록 지연).
+   - `ring(talker, channel)`: IMPORTANCE_HIGH 헤드업 알림 + fullScreenIntent + 진동 +
+     앱 액티비티 기동.
+   - 상시 알림 빌더(액션: 열기 / 전원 끄기), 알림 채널 2종 생성, `isActive` 플래그.
+3. `android/app/src/main/kotlin/com/wktk/wktk/MainActivity.kt`
+   - `MethodChannel("wktk/power")` → `setPower` / `ring` / `isPowerOn` 핸들러 추가.
+4. `android/app/src/main/AndroidManifest.xml`
+   - 권한 추가: `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_MEDIA_PLAYBACK`,
+     `POST_NOTIFICATIONS`, `VIBRATE`, `USE_FULL_SCREEN_INTENT`.
+   - `<service .WktkPowerService foregroundServiceType="mediaPlayback" stopWithTask="false"/>`.
+   - `MainActivity`: `launchMode=singleTask`, `taskAffinity=""` 제거
+     (서비스에서 호출 인텐트 시 기존 태스크가 확실히 재사용되도록).
+5. `lib/core/platform/power_channel.dart` (신규) — `setPower`/`isPowerOn`/`ring` 래퍼.
+   플러그인 미지원/예외는 삼켜 앱 동작에는 영향 없음(테스트/iOS 안전).
+6. `lib/core/platform/notification_permission.dart` (신규) — Android 13+ 알림 권한
+   1회 요청(온보딩 + 전원 ON 시).
+7. `lib/features/walkie/presentation/walkie_controller.dart`
+   - `build()`: `AppLifecycleListener.onStateChange`로 현재 lifecycle 추적,
+     `scheduleMicrotask(_powerOn)`으로 앱 실행 = 전원 ON(FGS 기동 + 알림 권한).
+   - `powerOff()`: 상태 OFF → 세션 teardown → `PowerChannel.setPower(false)` →
+     `SystemNavigator.pop()`(네이티브가 프로세스까지 종료).
+   - `_onResume()`: 세션이 살아 있으면 유지하고 죽었을 때만 재기동
+     (이전처럼 매번 재기동해 통화가 끊기던 동작 제거). 서비스 재확인.
+   - `_maybeCallFromBackground()`: lifecycle이 `resumed` 가 아니고 상대 PTT 감지
+     (`remoteStarted` 버스 이벤트 또는 RX 버스트 첫 프레임) 시 3초 쿨다운 후 전화.
+   - `WalkieUiState.powerOn` 가드: 미연결·PTT·접속 확인·세션 기동 모두 전원 OFF 시 차단.
+8. `lib/features/walkie/domain/walkie_state.dart` — `powerOn`, `incomingCaller` 추가.
+   `copyWith` nullable 필드에 `_unset` 센티널 도입.
+9. `lib/features/walkie/presentation/widgets/power_button.dart` (신규) — 붉은 원형 전원
+   버튼(ON 점등 + 글로우 / OFF 소등), Semantics 라벨, Tooltip.
+10. `lib/features/walkie/presentation/walkie_screen.dart` — 상단 헤더를 `Column`으로
+    바꾸어 환경설정 아이콘 아래에 전원 버튼 배치, 전원 OFF 확인 `AlertDialog`,
+    `incomingCaller` 감청 SnackBar('○○ 님이 전화를 걸었습니다').
+11. `lib/features/settings/presentation/settings_screen.dart` — '전원 · 백그라운드'
+    섹션(전원 상태 표시 + 알림 권한 상태/앱 설정 열기).
+12. `lib/features/onboarding/onboarding_controller.dart` — 마이크 허용 시 알림 권한 함께 요청.
+13. `lib/core/constants/app_constants.dart` — `kIncomingCallCooldown`(3초).
+14. `test/power_test.dart` (신규) — 5건.
+15. `README.md` — 기능/권한/전원·백그라운드 테스트 절차 갱신.
+
+### 검증
+
+- `flutter analyze`: No issues found
+- `flutter test`: 72/72 통과 (기존 67 + 신규 5)
+- `flutter build apk --debug`: 성공 (Kotlin/매니페스트 컴파일 포함 확인)
+- 미수행: 실기기 2대 E2E(백그라운드·화면 OFF 상태 PTT 수신 → 자동 전화, 알림 액션).
+
+### 함정 / 배운 것
+
+- **Notifier.build() 안의 동기 `state=`**: `unawaited(_powerOn())` 처럼 보여도 호출 시점에
+  동기적으로 state를 읽으면 `Bad state: uninitialized provider` 로 죽는다
+  → `scheduleMicrotask` 로 미뤄 실행.
+- **copyWith 로 null 지우기 불가**: `x ?? this.x` 패턴은 `null` 을 '변경 없음'으로
+  해석해 `talkerNickname` 이 지워지지 않는 버그가 있었다 → `_unset` 센티널로 교체.
+- **위젯 테스트의 pumpAndSettle 타임아웃**: 무전기 화면에 점멸 LED 등 무한 애니메이션이
+  있어 `pumpAndSettle` 이 끝나지 않는다 → 다이얼로그는 `pump(400 ms)` 로 진행.
+- **taskAffinity="" (Flutter 템플릿)**: 서비스에서 Activity 를 올릴 때 기존 태스크
+  재사용이 불안정할 수 있어 제거 + `singleTask` 로 고정.
+- **FGS 종료 지연**: `setPower(false)` 에서 곧바로 kill 하면 MethodChannel 응답과
+  Dart 후속 정리(`SystemNavigator.pop`)가 끊기므로 250 ms 지연 후 종료.
+
+### 남은 작업 / 다음 액션
+
+- 실기기 2대 E2E: 화면을 끈 백그라운드 상태에서 상대 PTT 수신 → 자동 전화
+  (헤드업 + 진동) → 응답 송신, 그리고 전원 버튼/알림 액션으로 완전 종료 확인.
+- 제조사 ROM(삼성 등)의 포그라운드 서비스 강제 종료/앱 휴면 설정으로 대기가 끊길 수
+  있으므로 기기별 '배터리 · 앱 휴면' 설정 확인 안내가 필요하다.
+- iOS 는 전원 스위치/백그라운드 대기 미구현(멀티캐스트 entitlement 필요).
