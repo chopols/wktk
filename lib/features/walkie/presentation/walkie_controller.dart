@@ -10,6 +10,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/constants/app_constants.dart';
@@ -23,9 +24,9 @@ import '../data/audio/pcm_slicer.dart';
 import '../data/audio/sound_effects.dart';
 import '../data/channel_arbiter.dart';
 import '../data/jitter_buffer.dart';
-import '../data/peer.dart';
 import '../data/peer_registry.dart';
 import '../data/transceiver_service.dart';
+import '../domain/peer.dart';
 import '../domain/walkie_state.dart';
 
 class WalkieController extends Notifier<WalkieUiState> {
@@ -42,6 +43,7 @@ class WalkieController extends Notifier<WalkieUiState> {
   Timer? _drainTimer;
   Timer? _busyDeniedTimer;
   Timer? _collisionTimer;
+  AppLifecycleListener? _lifecycle;
   int _frameCounter = 0;
   DateTime? _lastAudioAt;
   bool _starting = false;
@@ -61,12 +63,36 @@ class WalkieController extends Notifier<WalkieUiState> {
         unawaited(_teardownSession());
       }
     });
+    // 백그라운드에서 복귀하면 OS가 Wi-Fi 멀티캐스트 멤버십을 끊어 접속이
+    // 만료될 수 있어 세션을 재기동(멀티캐스트 재가입 + PRESENCE 즉시 송신)한다.
+    _lifecycle = AppLifecycleListener(
+      onResume: () => unawaited(_reconnectFromBackground()),
+    );
     ref.onDispose(() {
+      _lifecycle?.dispose();
+      _lifecycle = null;
       unawaited(_teardownSession());
     });
     // 저장된 설정을 상태로 미리 반영 (세션 시작 전에도 설정 화면이 최신값 표시).
     unawaited(_loadPersistedSettings());
     return WalkieUiState.initial;
+  }
+
+  /// 백그라운드 → 포그라운드 복귀 시 세션 재기동으로 접속을 복구한다.
+  Future<void> _reconnectFromBackground() async {
+    final net = ref.read(networkStatusProvider);
+    if (!net.connected) return;
+    if (_service?.isTransmitting ?? false) return; // 통화 중이면 끊지 않는다
+    await restartSession(localIPv4: net.localIPv4);
+  }
+
+  /// '접속 확인' 버튼: 네트워크에 연결돼 있으면 세션을 재기동한다.
+  /// [bool] 반환 = 재기동을 시도했는지(미연결/통화 중이면 false).
+  Future<bool> checkConnection() async {
+    final net = ref.read(networkStatusProvider);
+    if (!net.connected) return false;
+    await restartSession(localIPv4: net.localIPv4);
+    return true;
   }
 
   // ── 세션 ────────────────────────────────────────────────
@@ -154,7 +180,10 @@ class WalkieController extends Notifier<WalkieUiState> {
         (_) => _drainJitter(),
       );
 
-      state = state.copyWith(peerCount: service.peerCount);
+      state = state.copyWith(
+        peerCount: service.peerCount,
+        peers: service.peers,
+      );
       if (state.voxEnabled) {
         await _startVoxCapture();
       }
@@ -195,6 +224,7 @@ class WalkieController extends Notifier<WalkieUiState> {
     if (!ref.mounted) return;
     state = state.copyWith(
       peerCount: 0,
+      peers: const <Peer>[],
       txStatus: TxStatus.idle,
       signalLevel: 0.0,
       channelBusy: false,
@@ -204,7 +234,11 @@ class WalkieController extends Notifier<WalkieUiState> {
 
   void _onPeersChanged(List<Peer> peers) {
     final talking = peers.any((p) => p.txActive);
-    state = state.copyWith(peerCount: peers.length, channelBusy: talking);
+    state = state.copyWith(
+      peerCount: peers.length,
+      peers: List<Peer>.unmodifiable(peers),
+      channelBusy: talking,
+    );
   }
 
   void _onBusEvent(BusEvent e) {

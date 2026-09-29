@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import '../../../../app/theme.dart';
 import '../../../../core/network/network_monitor.dart' show NetKind;
 import '../../domain/walkie_state.dart';
+import 'peer_list_sheet.dart';
 import 'seven_seg_number.dart';
 
 class LcdPanel extends StatelessWidget {
@@ -89,9 +90,33 @@ class LcdPanel extends StatelessWidget {
                             style: _lcdText(statusColor, 13, bold: true),
                           ),
                           const SizedBox(height: 6),
-                          Text(
-                            '접속 ${state.peerCount}대',
-                            style: _lcdText(AppColors.lcdTextDim, 12),
+                          GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onTap: () => showPeerListSheet(
+                              context,
+                              peers: state.peers,
+                              localNickname: state.localNickname,
+                              channel: state.channel,
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(
+                                  Icons.people_alt_outlined,
+                                  size: 11,
+                                  color: AppColors.lcdTextDim,
+                                ),
+                                const SizedBox(width: 4),
+                                Text(
+                                  '접속 ${state.peerCount}대',
+                                  style: _lcdText(AppColors.lcdTextDim, 12)
+                                      .copyWith(
+                                        decoration: TextDecoration.underline,
+                                        decorationColor: AppColors.lcdTextDim,
+                                      ),
+                                ),
+                              ],
+                            ),
                           ),
                           const SizedBox(height: 4),
                           Row(

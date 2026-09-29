@@ -4,7 +4,7 @@
 library;
 
 import '../../../core/constants/app_constants.dart';
-import 'peer.dart';
+import '../domain/peer.dart';
 
 class PeerRegistry {
   final Map<String, Peer> _peers = <String, Peer>{};

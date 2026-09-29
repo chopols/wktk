@@ -13,8 +13,8 @@ import '../../../core/constants/app_constants.dart';
 import '../../../core/network/packet.dart';
 import '../../../core/network/packet_codec.dart';
 import '../../../core/network/transport/transport.dart';
+import '../domain/peer.dart';
 import 'channel_arbiter.dart';
-import 'peer.dart';
 import 'peer_registry.dart';
 
 /// 수신 오디오 이벤트.

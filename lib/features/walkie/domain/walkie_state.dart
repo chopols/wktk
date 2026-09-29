@@ -4,6 +4,7 @@ library;
 import 'package:flutter/foundation.dart';
 
 import '../../../core/network/network_monitor.dart' show NetKind;
+import 'peer.dart';
 
 enum TxStatus { idle, transmitting, receiving, busy, collision }
 
@@ -16,6 +17,7 @@ class WalkieUiState {
     this.wifiOk = true,
     this.netKind = NetKind.unknown,
     this.peerCount = 0,
+    this.peers = const <Peer>[],
     this.talkerNickname,
     this.localNickname = '나',
     this.signalLevel = 0.0,
@@ -33,6 +35,7 @@ class WalkieUiState {
   final bool wifiOk;
   final NetKind netKind;
   final int peerCount;
+  final List<Peer> peers; // 같은 채널 접속자 목록 (LCD 접속대수 탭 시 표시)
   final String? talkerNickname; // RX 중 송신자 닉네임
   final String localNickname;
   final double signalLevel; // 0.0 ~ 1.0 (레벨 미터)
@@ -52,6 +55,7 @@ class WalkieUiState {
     bool? wifiOk,
     NetKind? netKind,
     int? peerCount,
+    List<Peer>? peers,
     String? talkerNickname,
     String? localNickname,
     double? signalLevel,
@@ -69,6 +73,7 @@ class WalkieUiState {
       wifiOk: wifiOk ?? this.wifiOk,
       netKind: netKind ?? this.netKind,
       peerCount: peerCount ?? this.peerCount,
+      peers: peers ?? this.peers,
       talkerNickname: talkerNickname ?? this.talkerNickname,
       localNickname: localNickname ?? this.localNickname,
       signalLevel: signalLevel ?? this.signalLevel,

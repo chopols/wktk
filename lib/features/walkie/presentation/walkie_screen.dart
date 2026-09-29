@@ -7,6 +7,7 @@ import '../domain/walkie_state.dart';
 import 'walkie_controller.dart';
 import 'widgets/antenna_widget.dart';
 import 'widgets/lcd_panel.dart';
+import 'widgets/peer_list_sheet.dart';
 import 'widgets/ptt_button.dart';
 import 'widgets/rotary_knob.dart';
 import 'widgets/speaker_grille_widget.dart';
@@ -226,27 +227,43 @@ class WalkieScreen extends ConsumerWidget {
                 child: Row(
                   children: [
                     Expanded(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text(
-                            tx ? '통화 중' : 'IDLE',
-                            style: TextStyle(
-                              color: tx ? AppColors.accent : AppColors.textMid,
-                              fontSize: 12,
+                      child: Center(
+                        child: OutlinedButton.icon(
+                          onPressed: () async {
+                            if (!state.wifiOk) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text('Wi-Fi에 연결되어 있지 않습니다'),
+                                ),
+                              );
+                              return;
+                            }
+                            await controller.checkConnection();
+                            if (!context.mounted) return;
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(content: Text('접속을 다시 확인합니다')),
+                            );
+                          },
+                          icon: const Icon(Icons.refresh, size: 15),
+                          label: const Text(
+                            '접속\n확인',
+                            textAlign: TextAlign.center,
+                          ),
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: AppColors.accent,
+                            side: const BorderSide(color: AppColors.accentDim),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 8,
+                            ),
+                            minimumSize: const Size(0, 0),
+                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                            textStyle: const TextStyle(
+                              fontSize: 11,
                               fontWeight: FontWeight.w700,
                             ),
                           ),
-                          const SizedBox(height: 3),
-                          const Text(
-                            '상대가 통화 중이면\n자동 대기합니다',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                              color: AppColors.textLow,
-                              fontSize: 10,
-                            ),
-                          ),
-                        ],
+                        ),
                       ),
                     ),
                     PttButton(
@@ -258,12 +275,40 @@ class WalkieScreen extends ConsumerWidget {
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Text(
-                            '접속 ${state.peerCount}대',
-                            style: const TextStyle(
-                              color: AppColors.textMid,
-                              fontSize: 12,
-                              fontWeight: FontWeight.w700,
+                          InkWell(
+                            borderRadius: BorderRadius.circular(8),
+                            onTap: () => showPeerListSheet(
+                              context,
+                              peers: state.peers,
+                              localNickname: state.localNickname,
+                              channel: state.channel,
+                            ),
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 6,
+                                vertical: 2,
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Icon(
+                                    Icons.people_alt_outlined,
+                                    size: 13,
+                                    color: AppColors.accent,
+                                  ),
+                                  const SizedBox(width: 4),
+                                  Text(
+                                    '접속 ${state.peerCount}대',
+                                    style: const TextStyle(
+                                      color: AppColors.textMid,
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w700,
+                                      decoration: TextDecoration.underline,
+                                      decorationColor: AppColors.textLow,
+                                    ),
+                                  ),
+                                ],
+                              ),
                             ),
                           ),
                           const SizedBox(height: 3),

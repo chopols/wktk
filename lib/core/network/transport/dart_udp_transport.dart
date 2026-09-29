@@ -3,8 +3,8 @@
 /// - RX: `anyIPv4:<kBasePort+channel>` 고정포트, `reuseAddress` 바인딩 후 멀티캐스트 join
 /// - TX: 같은 소켓에서 멀티캐스트 → 브로드캐스트(전역 + /24 가정) 순 발송
 /// - 제약: Dart가 멀티캐스트 루프백 off API를 노출하지 않아 자기 패킷은
-///   `senderId` 비교로 폐기한다(상위 계층). 브로드캐스트는 SO_BROADCAST 미노출로
-///   일부 기기에서 전송 실패할 수 있어 SocketException은 무시한다.
+///   `senderId` 비교로 폐기한다(상위 계층). 브로드캐스트는 `broadcastEnabled`
+///   (SO_BROADCAST)를 켜서 발송하며, 실패 시 SocketException은 무시한다.
 library;
 
 import 'dart:async';
@@ -56,6 +56,14 @@ class DartUdpTransport implements RadioTransport {
       reuseAddress: true,
     );
     _socket = socket;
+
+    // 멀티캐스트가 차단된 환경(특히 iOS/일부 AP)에서는 브로드캐스트 폴백이
+    // 유일한 전송 경로다. SO_BROADCAST를 켜지 않으면 `send`가 실패한다.
+    try {
+      socket.broadcastEnabled = true;
+    } catch (_) {
+      // 일부 플랫폼은 브로드캐스트를 지원하지 않을 수 있다(무시).
+    }
 
     _group = '${AppConstants.kMulticastPrefix}.$channel';
     try {
